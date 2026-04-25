@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SCANNA by Umi</title>
+    <title>SCANNA by Umi - AI Powered</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -14,6 +14,7 @@
         body { font-family: 'Plus Jakarta Sans', sans-serif; }
         .custom-scrollbar::-webkit-scrollbar { width: 5px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .ai-glow { box-shadow: 0 0 15px rgba(99, 102, 241, 0.4); }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen">
@@ -22,12 +23,14 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
 
-        // --- KONFIGURASI GOOGLE (WAJIB DIISI) ---
+        // --- KONFIGURASI API (MANDATORY) ---
         const CLIENT_ID = "1060242803873-93257k5p0epj93dg07ll7oanc3cofm81.apps.googleusercontent.com"; // Masukkan Client ID Anda
-        const API_KEY = "AIzaSyBCwRn0uVC9H8Tz3MLLANByQwkErABjkqk";   // Masukkan API Key Anda
+        const API_KEY = "AIzaSyBCwRn0uVC9H8Tz3MLLANByQwkErABjkqk";   // Masukkan API Key Anda (Google Cloud API Key)
+        const geminiKey = ""; // Kosongkan, lingkungan akan menyediakan secara otomatis
+        
         const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/spreadsheets";
 
-        // --- KONFIGURASI OMR (Koordinat Presisi Berdasarkan Sampel Copy of 20260410120120_0034.jpg) ---
+        // Koordinat Fallback untuk Mode Standar
         const OMR_MAP = {
             rollNo: { x: 33.6, y: 32.2, w: 11.2, h: 21.5, cols: 4, rows: 10 },
             sections: [
@@ -45,6 +48,7 @@
         const App = () => {
             const [token, setToken] = useState(null);
             const [activeTab, setActiveTab] = useState('cloud');
+            const [scanMode, setScanMode] = useState('standard'); // 'standard' or 'ai'
             const [folderId, setFolderId] = useState(localStorage.getItem('umi_folder') || "");
             const [sheetId, setSheetId] = useState(localStorage.getItem('umi_sheet') || "");
             const [files, setFiles] = useState([]);
@@ -92,8 +96,65 @@
                 setLoading(false);
             };
 
-            // --- FUNGSI ANALISIS OMR TINGKAT TINGGI ---
-            const analyzeImage = async (fileId) => {
+            const blobToBase64 = (blob) => {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(blob);
+                });
+            };
+
+            // --- FUNGSI AI OMR (Presisi Tinggi) ---
+            const analyzeWithAI = async (fileId) => {
+                const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const blob = await resp.blob();
+                const base64Data = await blobToBase64(blob);
+
+                const prompt = `Analisis lembar LJK ini. Tolong identifikasi: 
+                1. Roll No (Nomor Ujian 4 digit yang diarsir).
+                2. Jawaban untuk soal nomor 1 sampai 40 (A, B, C, D, atau E). Jika tidak diarsir beri "-".
+                Format respon harus JSON murni:
+                { "rollNo": "string", "answers": ["A", "B", ...] }`;
+
+                const callGemini = async (retries = 0) => {
+                    try {
+                        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${geminiKey}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                contents: [{
+                                    parts: [
+                                        { text: prompt },
+                                        { inlineData: { mimeType: "image/jpeg", data: base64Data } }
+                                    ]
+                                }],
+                                generationConfig: { responseMimeType: "application/json" }
+                            })
+                        });
+                        const data = await res.json();
+                        return JSON.parse(data.candidates[0].content.parts[0].text);
+                    } catch (err) {
+                        if (retries < 5) {
+                            await new Promise(r => setTimeout(r, Math.pow(2, retries) * 1000));
+                            return callGemini(retries + 1);
+                        }
+                        throw err;
+                    }
+                };
+
+                const result = await callGemini();
+                let benar = 0;
+                result.answers.forEach((ans, i) => { if(ans === kunci[i] && kunci[i] !== '') benar++; });
+                const siswa = siswaDB.find(s => s.kode === result.rollNo) || { nama: "Tidak Dikenal", kode: result.rollNo };
+
+                return { kode: result.rollNo, nama: siswa.nama, benar, skor: ((benar / kunci.filter(k=>k!=='').length) * 100).toFixed(1), jawaban: result.answers };
+            };
+
+            // --- FUNGSI STANDAR OMR (Cepat) ---
+            const analyzeStandard = async (fileId) => {
                 const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
@@ -102,24 +163,18 @@
                 
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d', { willReadFrequently: true });
-                // Kita gunakan resolusi tinggi untuk analisis detail
                 canvas.width = 1200; 
-                canvas.height = 1697; // A4 Ratio
+                canvas.height = 1697;
                 ctx.drawImage(bitmap, 0, 0, 1200, 1697);
 
-                // Fungsi untuk menghitung rata-rata kegelapan di satu kotak
-                const getAverageBrightness = (x, y, w, h) => {
-                    const imgData = ctx.getImageData(x, y, w, h);
-                    const data = imgData.data;
+                const getBrightness = (x, y, w, h) => {
+                    const data = ctx.getImageData(x, y, w, h).data;
                     let sum = 0;
-                    for (let i = 0; i < data.length; i += 4) {
-                        // (R+G+B)/3
-                        sum += (data[i] + data[i+1] + data[i+2]) / 3;
-                    }
+                    for (let i = 0; i < data.length; i += 4) sum += (data[i] + data[i+1] + data[i+2]) / 3;
                     return sum / (w * h);
                 };
 
-                // 1. Scan Roll No (4 Digit) - Menggunakan metode Perbandingan Tergelap
+                // Scan Roll No
                 let rollNo = "";
                 const rn = OMR_MAP.rollNo;
                 const rnCellW = (rn.w * 1200 / 100) / rn.cols;
@@ -128,75 +183,37 @@
                 const rnStartY = (rn.y * 1697 / 100);
 
                 for (let c = 0; c < rn.cols; c++) {
-                    let darkestRow = -1;
-                    let minBrightness = 255;
-                    let rowBrightnessList = [];
-
+                    let darkest = -1; let minB = 255; let list = [];
                     for (let r = 0; r < rn.rows; r++) {
-                        const brightness = getAverageBrightness(
-                            rnStartX + (c * rnCellW),
-                            rnStartY + (r * rnCellH),
-                            rnCellW * 0.8, // Ambil tengahnya saja agar tidak kena garis
-                            rnCellH * 0.8
-                        );
-                        rowBrightnessList.push(brightness);
-                        if (brightness < minBrightness) {
-                            minBrightness = brightness;
-                            darkestRow = r;
-                        }
+                        const b = getBrightness(rnStartX + (c * rnCellW), rnStartY + (r * rnCellH), rnCellW * 0.8, rnCellH * 0.8);
+                        list.push(b);
+                        if (b < minB) { minB = b; darkest = r; }
                     }
-
-                    // Validasi: Apakah yang tergelap memang arsiran atau hanya noise?
-                    // Kita cek rata-rata baris lain, jika yang tergelap jauh lebih gelap, maka valid.
-                    const avgOthers = rowBrightnessList.reduce((a,b)=>a+b, 0) / rn.rows;
-                    if (avgOthers - minBrightness > 25) { // Threshold kontras arsiran
-                        rollNo += darkestRow.toString();
-                    } else {
-                        rollNo += "?";
-                    }
+                    if ((list.reduce((a,b)=>a+b, 0)/rn.rows) - minB > 25) rollNo += darkest.toString();
+                    else rollNo += "?";
                 }
 
-                // 2. Scan Jawaban 40 Soal - Menggunakan metode Perbandingan Tergelap
+                // Scan Jawaban
                 const answers = Array(40).fill('');
                 OMR_MAP.sections.forEach(sec => {
                     const secCellW = (sec.w * 1200 / 100) / sec.cols;
                     const secCellH = (sec.h * 1697 / 100) / sec.rows;
-                    const secStartX = (sec.x * 1200 / 100);
-                    const secStartY = (sec.y * 1697 / 100);
-
                     for (let r = 0; r < sec.rows; r++) {
                         const qIdx = sec.start + r - 1;
                         if (qIdx >= 40) continue;
-
-                        let darkestCol = -1;
-                        let minB = 255;
-                        let colBrightnessList = [];
-
+                        let darkestCol = -1; let minB = 255; let list = [];
                         for (let c = 0; c < sec.cols; c++) {
-                            const b = getAverageBrightness(
-                                secStartX + (c * secCellW),
-                                secStartY + (r * secCellH),
-                                secCellW * 0.7,
-                                secCellH * 0.7
-                            );
-                            colBrightnessList.push(b);
-                            if (b < minB) {
-                                minB = b;
-                                darkestCol = c;
-                            }
+                            const b = getBrightness((sec.x * 1200 / 100) + (c * secCellW), (sec.y * 1697 / 100) + (r * secCellH), secCellW * 0.7, secCellH * 0.7);
+                            list.push(b);
+                            if (b < minB) { minB = b; darkestCol = c; }
                         }
-
-                        const avgCol = colBrightnessList.reduce((a,b)=>a+b, 0) / sec.cols;
-                        if (avgCol - minB > 20) {
-                            answers[qIdx] = ['A','B','C','D','E'][darkestCol];
-                        }
+                        if ((list.reduce((a,b)=>a+b, 0)/sec.cols) - minB > 20) answers[qIdx] = ['A','B','C','D','E'][darkestCol];
                     }
                 });
 
                 let benar = 0;
                 answers.forEach((ans, i) => { if(ans === kunci[i] && kunci[i] !== '') benar++; });
                 const siswa = siswaDB.find(s => s.kode === rollNo) || { nama: "Tidak Dikenal", kode: rollNo };
-
                 return { kode: rollNo, nama: siswa.nama, benar, skor: ((benar / kunci.filter(k=>k!=='').length) * 100).toFixed(1), jawaban: answers };
             };
 
@@ -205,10 +222,11 @@
                 const final = [];
                 for(let i = 0; i < files.length; i++) {
                     try {
-                        const res = await analyzeImage(files[i].id);
+                        const res = scanMode === 'ai' ? await analyzeWithAI(files[i].id) : await analyzeStandard(files[i].id);
                         final.push(res);
                     } catch (err) {
                         console.error("Gagal memproses file:", files[i].name, err);
+                        final.push({ kode: "ERR", nama: files[i].name, benar: 0, skor: "0.0", jawaban: [] });
                     }
                     setProgress(Math.round(((i + 1) / files.length) * 100));
                 }
@@ -289,7 +307,7 @@
                                     </div>
                                 </div>
                                 {files.length > 0 && (
-                                    <div className="bg-white p-6 rounded-3xl border border-indigo-100 flex items-center justify-between shadow-sm animate-in slide-in-from-bottom-4">
+                                    <div className="bg-white p-6 rounded-3xl border border-indigo-100 flex items-center justify-between shadow-sm">
                                         <div>
                                             <p className="font-black text-indigo-900 text-lg">{files.length} Gambar LJK</p>
                                             <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">Tersedia di folder Drive</p>
@@ -352,14 +370,33 @@
 
                         {activeTab === 'scan' && (
                             <div className="flex flex-col items-center justify-center h-full py-10">
-                                <div className="bg-white p-16 rounded-[4rem] shadow-2xl border-4 border-dashed border-slate-100 text-center max-w-lg animate-in zoom-in-95">
-                                    <div className="w-24 h-24 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-8 shadow-inner">
-                                        <i data-lucide="zap" className="w-12 h-12"></i>
+                                <div className="bg-white p-12 rounded-[4rem] shadow-2xl border-4 border-dashed border-slate-100 text-center max-w-lg animate-in zoom-in-95">
+                                    <div className="w-20 h-20 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-6 shadow-inner">
+                                        <i data-lucide={scanMode === 'ai' ? "sparkles" : "zap"} className="w-10 h-10"></i>
                                     </div>
-                                    <h2 className="text-4xl font-black mb-4 tracking-tighter text-slate-800 uppercase">Koreksi Cerdas</h2>
-                                    <p className="text-slate-400 font-bold uppercase text-xs tracking-[0.3em] mb-10 italic">Menggunakan Algoritma Kecerahan Relatif</p>
-                                    <button onClick={startBatch} disabled={files.length === 0} className="bg-indigo-950 text-white px-12 py-5 rounded-[2rem] font-black text-xl shadow-2xl hover:scale-105 active:scale-95 transition-all disabled:opacity-20">
-                                        JALANKAN SCAN ({files.length})
+                                    <h2 className="text-3xl font-black mb-2 tracking-tighter text-slate-800 uppercase">Pilih Mode Koreksi</h2>
+                                    
+                                    <div className="grid grid-cols-2 gap-4 mt-8 mb-10">
+                                        <button 
+                                            onClick={() => setScanMode('standard')}
+                                            className={`p-6 rounded-3xl border-2 transition-all ${scanMode === 'standard' ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg' : 'bg-white border-slate-100 text-slate-400 hover:border-indigo-200'}`}
+                                        >
+                                            <i data-lucide="zap" className="mx-auto mb-2"></i>
+                                            <p className="font-black text-xs uppercase tracking-widest">Fast Scan</p>
+                                            <p className="text-[10px] opacity-70">Standar Pixel</p>
+                                        </button>
+                                        <button 
+                                            onClick={() => setScanMode('ai')}
+                                            className={`p-6 rounded-3xl border-2 transition-all ai-glow ${scanMode === 'ai' ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg' : 'bg-white border-slate-100 text-slate-400 hover:border-indigo-200'}`}
+                                        >
+                                            <i data-lucide="sparkles" className="mx-auto mb-2 text-amber-400"></i>
+                                            <p className="font-black text-xs uppercase tracking-widest">AI Precision</p>
+                                            <p className="text-[10px] opacity-70">Akurasi Tinggi</p>
+                                        </button>
+                                    </div>
+
+                                    <button onClick={startBatch} disabled={files.length === 0} className="w-full bg-indigo-950 text-white py-5 rounded-[2rem] font-black text-xl shadow-2xl hover:scale-105 active:scale-95 transition-all disabled:opacity-20">
+                                        MULAI SCAN ({files.length})
                                     </button>
                                 </div>
                             </div>
@@ -370,7 +407,7 @@
                                 <div className="flex justify-between items-center bg-white p-8 rounded-3xl shadow-sm border border-slate-100">
                                     <div>
                                         <h2 className="text-3xl font-black text-slate-800">{results.length} Data</h2>
-                                        <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">Siap Disinkronkan</p>
+                                        <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">Hasil Scan {scanMode.toUpperCase()}</p>
                                     </div>
                                     <button onClick={syncToSheets} className="bg-green-600 text-white px-8 py-3 rounded-2xl font-black shadow-lg hover:bg-green-700 transition-all flex items-center gap-2">
                                         <i data-lucide="file-spreadsheet"></i> KIRIM KE GOOGLE SHEETS
@@ -420,8 +457,12 @@
                                     <div className="absolute inset-0 border-8 border-white border-t-transparent rounded-full animate-spin"></div>
                                     <div className="absolute inset-0 flex items-center justify-center font-black text-2xl">{progress}%</div>
                                 </div>
-                                <h2 className="text-2xl font-black tracking-tight mb-2 uppercase">Scanna Sedang Bekerja</h2>
-                                <p className="font-bold opacity-40 uppercase text-[10px] tracking-[0.3em]">Menganalisis Detail Arsiran...</p>
+                                <h2 className="text-2xl font-black tracking-tight mb-2 uppercase">
+                                    {scanMode === 'ai' ? 'AI Sedang Membaca' : 'Scanna Sedang Bekerja'}
+                                </h2>
+                                <p className="font-bold opacity-40 uppercase text-[10px] tracking-[0.3em]">
+                                    {scanMode === 'ai' ? 'Menganalisis Detail Visual LJK...' : 'Menganalisis Detail Arsiran...'}
+                                </p>
                             </div>
                         )}
                     </main>

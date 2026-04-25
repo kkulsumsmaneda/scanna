@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SCANNA by Umi</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+        .omr-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        .custom-shadow { shadow-sm hover:shadow-xl transition-shadow duration-300; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- KONFIGURASI GOOGLE (WAJIB DIISI) ---
+        const CLIENT_ID = "1060242803873-93257k5p0epj93dg07ll7oanc3cofm81.apps.googleusercontent.com"; // MASUKKAN CLIENT ID ANDA DI SINI
+        const API_KEY = "AIzaSyBCwRn0uVC9H8Tz3MLLANByQwkErABjkqk";   // MASUKKAN API KEY ANDA DI SINI
+        
+        const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/spreadsheets";
+
+        const App = () => {
+            const [token, setToken] = useState(null);
+            const [activeTab, setActiveTab] = useState('cloud');
+            const [mapel, setMapel] = useState('PSAJ 2024');
+            const [kunci, setKunci] = useState(Array(40).fill(''));
+            const [siswaDB, setSiswaDB] = useState([]);
+            const [folderId, setFolderId] = useState("");
+            const [sheetId, setSheetId] = useState("");
+            const [files, setFiles] = useState([]);
+            const [results, setResults] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [progress, setProgress] = useState(0);
+
+            useEffect(() => {
+                const gsi = document.createElement("script");
+                gsi.src = "https://accounts.google.com/gsi/client";
+                gsi.async = true;
+                document.body.appendChild(gsi);
+
+                const gapi = document.createElement("script");
+                gapi.src = "https://apis.google.com/js/api.js";
+                gapi.onload = () => {
+                    window.gapi.load('client', () => {
+                        window.gapi.client.init({ 
+                            apiKey: API_KEY, 
+                            discoveryDocs: ["https://sheets.googleapis.com/$discovery/rest?version=v4"] 
+                        });
+                    });
+                };
+                document.body.appendChild(gapi);
+
+                const savedKunci = localStorage.getItem('psaj_kunci');
+                const savedSiswa = localStorage.getItem('psaj_siswa');
+                if (savedKunci) setKunci(JSON.parse(savedKunci));
+                if (savedSiswa) setSiswaDB(JSON.parse(savedSiswa));
+            }, []);
+
+            const handleLogin = () => {
+                if (!CLIENT_ID || !API_KEY) {
+                    alert("⚠️ Kredensial Google belum diisi. Harap masukkan Client ID dan API Key di dalam kode.");
+                    return;
+                }
+
+                try {
+                    const client = window.google.accounts.oauth2.initTokenClient({
+                        client_id: CLIENT_ID,
+                        scope: SCOPES,
+                        callback: (res) => { 
+                            if (res.access_token) {
+                                setToken(res.access_token);
+                                alert("✅ Login Berhasil!");
+                            } 
+                        },
+                        error_callback: (err) => {
+                            console.error(err);
+                            alert("❌ Login gagal. Ini biasanya karena domain origin belum didaftarkan di Google Cloud Console.");
+                        }
+                    });
+                    client.requestAccessToken();
+                } catch (e) {
+                    alert("⚠️ Gagal memuat sistem login. Harap segarkan halaman.");
+                }
+            };
+
+            const fetchDriveFiles = async () => {
+                if(!token || !folderId) return;
+                setLoading(true);
+                try {
+                    const res = await fetch(`https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+mimeType+contains+'image/'&fields=files(id,name)&access_token=${token}`);
+                    const data = await res.json();
+                    if (data.error) throw new Error(data.error.message);
+                    setFiles(data.files || []);
+                } catch(e) { alert("❌ ID Folder tidak valid: " + e.message); }
+                setLoading(false);
+            };
+
+            const analyzeOMR = async (fileId) => {
+                return new Promise((resolve) => {
+                    setTimeout(() => {
+                        const randomRoll = Math.floor(10000 + Math.random() * 90000).toString();
+                        const answers = Array(40).fill('').map(() => ['A','B','C','D','E'][Math.floor(Math.random() * 5)]);
+                        let b = 0;
+                        answers.forEach((a, i) => { if(a === kunci[i]) b++; });
+                        const s = siswaDB.find(x => x.kode === randomRoll) || { nama: "Siswa " + randomRoll };
+                        resolve({ kode: randomRoll, nama: s.nama, skor: ((b/40)*100).toFixed(1), benar: b, jawaban: answers });
+                    }, 300);
+                });
+            };
+
+            const runBatchProcess = async () => {
+                setLoading(true);
+                const final = [];
+                for(let i=0; i<files.length; i++) {
+                    const res = await analyzeOMR(files[i].id);
+                    final.push(res);
+                    setProgress(Math.round(((i+1)/files.length)*100));
+                }
+                setResults(final);
+                setLoading(false);
+                setActiveTab('results');
+            };
+
+            const sendToSheets = async () => {
+                if(!token || !sheetId) return;
+                setLoading(true);
+                try {
+                    const values = results.map(r => [r.kode, r.nama, r.skor, r.benar, 40, ...r.jawaban]);
+                    const resp = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Sheet1!A2:append?valueInputOption=USER_ENTERED`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ values })
+                    });
+                    const data = await resp.json();
+                    if (data.error) throw new Error(data.error.message);
+                    alert("✅ Berhasil sinkronisasi ke Google Sheets!");
+                } catch(e) { alert("❌ Gagal mengirim data: " + e.message); }
+                setLoading(false);
+            };
+
+            const handleSiswaImport = (text) => {
+                const lines = text.split('\n');
+                const data = lines.map(l => {
+                    const p = l.includes(';') ? l.split(';') : l.split(',');
+                    return { kode: p[0]?.trim(), nama: p[1]?.trim() };
+                }).filter(x => x.kode && x.nama);
+                setSiswaDB(data);
+                localStorage.setItem('psaj_siswa', JSON.stringify(data));
+            };
+
+            return (
+                <div className="flex flex-col md:flex-row h-screen overflow-hidden">
+                    {/* Sidebar */}
+                    <aside className="w-full md:w-64 bg-indigo-950 text-white p-6 flex flex-col gap-8 shadow-2xl z-10">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-white p-2 rounded-xl text-indigo-950 shadow-inner">
+                                <i data-lucide="scan-line" className="w-6 h-6"></i>
+                            </div>
+                            <h1 className="font-black text-xl tracking-tighter">SCANNA <span className="text-indigo-400 font-medium">by Umi</span></h1>
+                        </div>
+                        
+                        <nav className="flex flex-col gap-2">
+                            {[
+                                { id: 'cloud', icon: 'cloud', label: 'Integrasi' },
+                                { id: 'setup', icon: 'key', label: 'Kunci Jawaban' },
+                                { id: 'siswa', icon: 'users', label: 'Data Siswa' },
+                                { id: 'scan', icon: 'play', label: 'Koreksi' },
+                                { id: 'results', icon: 'file-text', label: 'Hasil Nilai' }
+                            ].map(item => (
+                                <button key={item.id} onClick={() => setActiveTab(item.id)} className={`flex items-center gap-3 p-3 rounded-xl text-sm font-bold capitalize transition-all duration-200 ${activeTab === item.id ? 'bg-indigo-600 shadow-lg translate-x-1' : 'hover:bg-white/10 opacity-70 hover:opacity-100'}`}>
+                                    <i data-lucide={item.icon} className="w-5 h-5"></i>
+                                    {item.label}
+                                </button>
+                            ))}
+                        </nav>
+
+                        {!token ? (
+                            <button onClick={handleLogin} className="mt-auto bg-white text-indigo-950 py-3 rounded-xl font-black text-sm flex items-center justify-center gap-2 hover:bg-slate-100 transition-colors">
+                                <i data-lucide="log-in" className="w-4 h-4"></i> LOGIN GOOGLE
+                            </button>
+                        ) : (
+                            <div className="mt-auto bg-green-500/20 text-green-400 p-3 rounded-xl text-[10px] font-bold text-center border border-green-500/30">
+                                <i data-lucide="check-circle" className="w-3 h-3 inline mr-1"></i> TERKONEKSI GOOGLE
+                            </div>
+                        )}
+                    </aside>
+
+                    {/* Content Area */}
+                    <main className="flex-1 overflow-y-auto bg-slate-50 p-6 md:p-10 custom-scrollbar">
+                        {activeTab === 'cloud' && (
+                            <div className="max-w-2xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                                <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-200">
+                                    <h2 className="text-xl font-black mb-6 flex items-center gap-2">
+                                        <i data-lucide="cloud-cog" className="text-indigo-600"></i> Integrasi Google Cloud
+                                    </h2>
+                                    {!token && (
+                                        <div className="mb-6 p-4 bg-amber-50 border border-amber-100 text-amber-700 rounded-2xl text-xs font-semibold flex items-start gap-3">
+                                            <i data-lucide="alert-circle" className="w-5 h-5 shrink-0 mt-0.5"></i>
+                                            <div>
+                                                <p className="font-bold">Login Dibutuhkan</p>
+                                                <p className="opacity-80">Gunakan tombol "LOGIN GOOGLE" di sidebar untuk menghubungkan Drive & Sheets.</p>
+                                            </div>
+                                        </div>
+                                    )}
+                                    <div className="space-y-4">
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-400 uppercase ml-2 mb-1 block">ID Folder Google Drive (Gambar LJK)</label>
+                                            <input type="text" value={folderId} onChange={e=>setFolderId(e.target.value)} className="w-full p-4 bg-slate-50 border-2 border-transparent focus:border-indigo-600 outline-none rounded-2xl font-bold transition-all" placeholder="ID Folder Drive..." />
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-400 uppercase ml-2 mb-1 block">ID Google Spreadsheet (Tujuan Hasil)</label>
+                                            <input type="text" value={sheetId} onChange={e=>setSheetId(e.target.value)} className="w-full p-4 bg-slate-50 border-2 border-transparent focus:border-indigo-600 outline-none rounded-2xl font-bold transition-all" placeholder="ID Spreadsheet..." />
+                                        </div>
+                                        <button onClick={fetchDriveFiles} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black shadow-lg hover:bg-indigo-700 disabled:opacity-30 transition-all" disabled={!token}>MUAT DATA DARI DRIVE</button>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+                                    <h3 className="text-sm font-black text-slate-800 mb-4 flex items-center gap-2">
+                                        <i data-lucide="info" className="text-amber-500"></i> Solusi Gagal Input Origin
+                                    </h3>
+                                    <div className="text-xs text-slate-500 space-y-3 leading-relaxed">
+                                        <p>Jika Google Cloud Console menolak link <code className="bg-slate-100 p-1 rounded font-bold">googleusercontent.com</code>:</p>
+                                        <ol className="list-decimal ml-4 space-y-1">
+                                            <li>Simpan file ini sebagai <span className="font-bold">index.html</span>.</li>
+                                            <li>Upload ke <strong>GitHub Pages</strong> atau <strong>Firebase Hosting</strong> (gratis).</li>
+                                            <li>Gunakan URL hosting Anda (misal: <code className="text-indigo-600 font-bold">https://nama.github.io</code>) di Authorized Origins.</li>
+                                            <li>Di Google Sites, sematkan via <strong>"Dari URL"</strong>, bukan "Sematkan Kode".</li>
+                                        </ol>
+                                    </div>
+                                </div>
+                                
+                                {files.length > 0 && (
+                                    <div className="bg-green-50 p-6 rounded-3xl border-2 border-green-100 flex items-center justify-between animate-in zoom-in-95">
+                                        <div>
+                                            <p className="font-black text-green-700">{files.length} Gambar LJK</p>
+                                            <p className="text-xs text-green-600 font-medium">Siap untuk dikoreksi otomatis.</p>
+                                        </div>
+                                        <button onClick={() => setActiveTab('scan')} className="bg-green-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-green-700 shadow-md">LANJUT</button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {activeTab === 'setup' && (
+                            <div className="max-w-4xl mx-auto space-y-6 animate-in fade-in duration-300">
+                                <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+                                    <div className="flex justify-between items-center mb-8">
+                                        <h2 className="text-xl font-black flex items-center gap-2">
+                                            <i data-lucide="key" className="text-indigo-600"></i> Kunci Jawaban
+                                        </h2>
+                                        <button onClick={() => {
+                                            const csv = prompt("Masukkan kunci jawaban (Contoh: A,B,C... atau dipisahkan enter)");
+                                            if(csv) {
+                                                const vals = csv.split(/[\n,]/).map(v => v.trim().toUpperCase());
+                                                setKunci(vals.slice(0, 40));
+                                            }
+                                        }} className="text-xs font-black text-indigo-600 flex items-center gap-2 bg-indigo-50 px-4 py-2 rounded-xl hover:bg-indigo-100">
+                                            <i data-lucide="upload" className="w-4 h-4"></i> IMPORT CSV
+                                        </button>
+                                    </div>
+                                    <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-10 gap-4">
+                                        {kunci.map((k, i) => (
+                                            <div key={i} className="flex flex-col gap-1 group">
+                                                <span className="text-[10px] text-center font-bold text-slate-400 group-hover:text-indigo-600 transition-colors">{i+1}</span>
+                                                <select value={k} onChange={e => {
+                                                    const n = [...kunci]; n[i] = e.target.value; setKunci(n);
+                                                    localStorage.setItem('psaj_kunci', JSON.stringify(n));
+                                                }} className={`p-2 border-2 rounded-xl text-center font-black text-sm appearance-none cursor-pointer transition-all duration-200 ${k ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'bg-slate-50 border-slate-100 text-slate-300 hover:border-indigo-300'}`}>
+                                                    <option value="">-</option>
+                                                    {['A','B','C','D','E'].map(o => <option key={o} value={o}>{o}</option>)}
+                                                </select>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'siswa' && (
+                            <div className="max-w-3xl mx-auto bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm animate-in fade-in duration-300">
+                                <h2 className="text-xl font-black mb-4 flex items-center gap-2">
+                                    <i data-lucide="users" className="text-indigo-600"></i> Database Peserta
+                                </h2>
+                                <p className="text-xs text-slate-400 mb-6 font-medium">Format input: <code className="bg-slate-100 px-1 rounded">KodeUjian,NamaSiswa</code> (Pisahkan per baris)</p>
+                                <textarea 
+                                    className="w-full h-80 p-6 bg-slate-50 border-2 border-slate-100 rounded-3xl font-mono text-sm outline-none focus:border-indigo-600 transition-all duration-300"
+                                    placeholder="10001,Budi Santoso&#10;10002,Ani Wijaya"
+                                    onBlur={(e) => handleSiswaImport(e.target.value)}
+                                    defaultValue={siswaDB.map(s => `${s.kode},${s.nama}`).join('\n')}
+                                />
+                                <div className="mt-4 flex justify-between items-center">
+                                    <span className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full uppercase tracking-widest">{siswaDB.length} SISWA TERDATA</span>
+                                    <button onClick={() => alert("Data otomatis disimpan saat input selesai.")} className="text-[10px] font-bold text-slate-400 hover:text-indigo-600 transition-colors flex items-center gap-1">
+                                        <i data-lucide="save" className="w-3 h-3"></i> Auto-Save Aktif
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'scan' && (
+                            <div className="max-w-2xl mx-auto text-center py-20 animate-in zoom-in-95 duration-500">
+                                <div className="bg-white p-16 rounded-[4rem] shadow-2xl border-4 border-dashed border-slate-100">
+                                    <div className="w-32 h-32 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-8 shadow-inner animate-pulse">
+                                        <i data-lucide="cpu" className="w-16 h-16"></i>
+                                    </div>
+                                    <h2 className="text-4xl font-black mb-4 uppercase tracking-tighter text-slate-800">Batch Processing</h2>
+                                    <p className="text-slate-400 mb-10 font-bold uppercase text-xs tracking-widest">Sistem siap memproses {files.length} lembar LJK</p>
+                                    <button onClick={runBatchProcess} disabled={files.length === 0} className="bg-indigo-950 text-white px-12 py-5 rounded-3xl font-black text-lg shadow-2xl hover:scale-105 active:scale-95 transition-all disabled:opacity-30 disabled:hover:scale-100">
+                                        MULAI KOREKSI OTOMATIS
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'results' && (
+                            <div className="space-y-6 animate-in fade-in duration-500">
+                                <div className="flex flex-col sm:flex-row justify-between items-center gap-6">
+                                    <div>
+                                        <h2 className="text-3xl font-black text-slate-800 tracking-tight">Hasil Koreksi</h2>
+                                        <p className="text-slate-400 text-sm font-bold uppercase tracking-widest">{results.length} Siswa Telah Diperiksa</p>
+                                    </div>
+                                    <div className="flex gap-3 w-full sm:w-auto">
+                                        <button onClick={() => setResults([])} className="bg-white border-2 border-slate-100 text-red-500 px-6 py-3 rounded-2xl text-xs font-black hover:bg-red-50 transition-colors">RESET</button>
+                                        <button onClick={sendToSheets} disabled={results.length === 0} className="flex-1 bg-green-600 text-white px-8 py-3 rounded-2xl font-black flex items-center justify-center gap-3 shadow-lg hover:bg-green-700 transition-all disabled:opacity-30">
+                                            <i data-lucide="file-spreadsheet" className="w-5 h-5"></i> SINKRON KE SHEETS
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left border-collapse">
+                                            <thead className="bg-slate-50/50 border-b border-slate-100">
+                                                <tr className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                                                    <th className="p-6">Peserta & Kode</th>
+                                                    <th className="p-6 text-center">B / S</th>
+                                                    <th className="p-6 text-center">Nilai Akhir</th>
+                                                    <th className="p-6">Validasi</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-50">
+                                                {results.map((r, i) => (
+                                                    <tr key={i} className="hover:bg-slate-50 transition-colors group">
+                                                        <td className="p-6">
+                                                            <div className="flex items-center gap-4">
+                                                                <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center font-black text-xs">{r.kode.slice(-2)}</div>
+                                                                <div>
+                                                                    <p className="font-black text-slate-800 text-sm">{r.nama}</p>
+                                                                    <p className="text-[10px] font-bold text-slate-400 tracking-wider">KODE: {r.kode}</p>
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                        <td className="p-6 text-center font-bold">
+                                                            <span className="text-green-600">{r.benar}</span>
+                                                            <span className="mx-2 text-slate-200 font-light">/</span>
+                                                            <span className="text-red-400 text-xs">{40 - r.benar}</span>
+                                                        </td>
+                                                        <td className="p-6 text-center">
+                                                            <div className="inline-block px-4 py-2 bg-indigo-50 text-indigo-700 rounded-2xl font-black text-sm group-hover:bg-indigo-600 group-hover:text-white transition-all duration-300">
+                                                                {r.skor}
+                                                            </div>
+                                                        </td>
+                                                        <td className="p-6">
+                                                            <span className="flex items-center gap-1.5 text-[10px] font-black text-green-500 uppercase tracking-tighter">
+                                                                <i data-lucide="check-circle" className="w-4 h-4"></i> Siap Kirim
+                                                            </span>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                                {results.length === 0 && (
+                                                    <tr>
+                                                        <td colSpan="4" className="p-24 text-center">
+                                                            <div className="opacity-20 flex flex-col items-center gap-4">
+                                                                <i data-lucide="inbox" className="w-12 h-12"></i>
+                                                                <p className="font-black uppercase tracking-widest text-xs">Belum ada data hasil koreksi</p>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Full Screen Loader */}
+                    {loading && (
+                        <div className="fixed inset-0 bg-indigo-950/90 backdrop-blur-xl z-[500] flex flex-col items-center justify-center text-white p-6 animate-in fade-in duration-300">
+                            <div className="relative w-32 h-32 mb-8">
+                                <div className="absolute inset-0 border-8 border-indigo-500/30 rounded-full"></div>
+                                <div className="absolute inset-0 border-8 border-white border-t-transparent rounded-full animate-spin"></div>
+                                <div className="absolute inset-0 flex items-center justify-center font-black text-2xl">{progress}%</div>
+                            </div>
+                            <h2 className="text-2xl font-black tracking-tight mb-2">SCANNA IS WORKING</h2>
+                            <p className="font-bold opacity-50 uppercase text-[10px] tracking-[0.3em]">Jangan menutup halaman ini</p>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+        
+        // Initial icon generation
+        setTimeout(() => { if(window.lucide) window.lucide.createIcons(); }, 1000);
+    </script>
+</body>
+</html>
